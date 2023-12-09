@@ -36,14 +36,14 @@ impl DNSMessage {
     fn deserialize(binarr: &[u8]) -> DNSMessage {
         let header = DNSHeader::deserialize(binarr.take(12).into_inner());
 
-        dbg!(header.qdcount);
-
         DNSMessage { header }
     }
 
     fn serialize(&self) -> Vec<u8> {
         let mut buffer = vec![].writer();
         buffer.write_all(&self.header.serialize()).unwrap();
+
+        dbg!(self);
 
         buffer.into_inner()
     }
@@ -122,20 +122,10 @@ fn main() {
                 let _received_data = String::from_utf8_lossy(&buf[0..size]);
                 println!("Received {} bytes from {}", size, source);
 
-                dbg!(buf
-                    .iter()
-                    .map(|x| format!("{:x}", x))
-                    .collect::<String>());
-
                 let mut message = DNSMessage::deserialize(&buf);
 
                 message.to_response();
                 let response = message.serialize();
-
-                dbg!(response
-                    .iter()
-                    .map(|x| format!("{:x}", x))
-                    .collect::<String>());
 
                 udp_socket
                     .send_to(&response, source)
