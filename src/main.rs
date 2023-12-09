@@ -99,6 +99,10 @@ impl DNSMessage {
 
         buffer.into_inner()
     }
+
+    fn to_response(&mut self) {
+        self.header.qr = 1
+    }
 }
 
 fn main() {
@@ -115,11 +119,10 @@ fn main() {
                 let _received_data = String::from_utf8_lossy(&buf[0..size]);
                 println!("Received {} bytes from {}", size, source);
 
-                let message = DNSMessage::deserialize(&buf);
-                dbg!(&message);
+                let mut message = DNSMessage::deserialize(&buf);
+                message.to_response();
 
                 let response = message.serialize();
-                dbg!(buf.len());
 
                 udp_socket
                     .send_to(&response, source)
