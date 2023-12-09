@@ -1,5 +1,7 @@
 // Uncomment this block to pass the first stage
-use std::{borrow::Cow, net::UdpSocket};
+use std::{borrow::Cow, io::Write, net::UdpSocket, ops::Deref, panic::PanicInfo, vec};
+
+use bytes::BufMut;
 
 #[derive(Debug)]
 struct DNSMessage {
@@ -24,28 +26,34 @@ struct DNSHeader {
 }
 
 impl DNSMessage {
-    fn deserialize(binarr: &Cow<'_, str>) -> DNSMessage {
-        let bindata = &binarr.as_bytes()[0..=12];
+    fn deserialize(binarr: &[u8]) -> DNSMessage {
+        let mut bin_header = binarr.iter();
 
-        // let mut biniter = binarr.iter().take(12);
+        let id = u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
+        dbg!(format!("{:x}", id));
 
-        let id = u16::from_be_bytes([bindata[0], bindata[1]]);
+        let byte = *bin_header.next().unwrap();
+        dbg!(byte);
+        let qr = byte >> 7;
+        let opcode = (byte >> 3) & 15;
+        let aa = (byte >> 2) & 1;
+        let tc = (byte >> 1) & 1;
+        let rd = byte & 1;
 
-        let row = u16::from_be_bytes([bindata[2], bindata[3]]);
+        let byte = *bin_header.next().unwrap();
+        dbg!(format!("{:x}", byte));
+        let ra = (byte >> 7) & 1;
+        let z = (byte >> 4) & 7;
+        let rcode = byte & 15;
 
-        let qr = (row >> 15) as u8;
-        let opcode = ((row >> 11) & 15) as u8;
-        let aa = ((row >> 10) & 1) as u8;
-        let tc = ((row >> 9) & 1) as u8;
-        let rd = ((row >> 8) & 1) as u8;
-        let ra = ((row >> 7) & 1) as u8;
-        let z = ((row >> 4) & 7) as u8;
-        let rcode = (row & 15) as u8;
-
-        let qdcount = u16::from_be_bytes([bindata[4], bindata[6]]);
-        let ancount = u16::from_be_bytes([bindata[7], bindata[8]]);
-        let nscount = u16::from_be_bytes([bindata[9], bindata[10]]);
-        let arcount = u16::from_be_bytes([bindata[11], bindata[12]]);
+        let qdcount =
+            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
+        let ancount =
+            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
+        let nscount =
+            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
+        let arcount =
+            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
 
         DNSMessage {
             header: DNSHeader {
@@ -65,6 +73,32 @@ impl DNSMessage {
             },
         }
     }
+
+    fn serialize(&self) -> Vec<u8> {
+        let mut buffer = vec![].writer();
+        let header = &self.header;
+
+        dbg!(&header);
+        buffer.write_all(&header.id.to_be_bytes()).unwrap();
+
+        buffer
+            .write(&[header.qr << 7
+                | header.opcode << 3
+                | header.aa << 3
+                | header.tc << 2
+                | header.rd])
+            .unwrap();
+        buffer
+            .write(&[(header.ra << 7 | header.z << 4 | header.rcode)])
+            .unwrap();
+
+        buffer.write_all(&header.qdcount.to_be_bytes()).unwrap();
+        buffer.write_all(&header.ancount.to_be_bytes()).unwrap();
+        buffer.write_all(&header.nscount.to_be_bytes()).unwrap();
+        buffer.write_all(&header.arcount.to_be_bytes()).unwrap();
+
+        buffer.into_inner()
+    }
 }
 
 fn main() {
@@ -79,14 +113,14 @@ fn main() {
         match udp_socket.recv_from(&mut buf) {
             Ok((size, source)) => {
                 let _received_data = String::from_utf8_lossy(&buf[0..size]);
-                dbg!(&_received_data);
                 println!("Received {} bytes from {}", size, source);
 
-                let message = DNSMessage::deserialize(&_received_data);
+                let message = DNSMessage::deserialize(&buf);
                 dbg!(&message);
 
-                let response = message.header.id.to_be_bytes();
-                dbg!(&response);
+                let response = message.serialize();
+                dbg!(buf.len());
+
                 udp_socket
                     .send_to(&response, source)
                     .expect("Failed to send response");
