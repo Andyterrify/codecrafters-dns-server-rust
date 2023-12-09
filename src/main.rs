@@ -26,25 +26,15 @@ struct DNSHeader {
 }
 
 impl DNSMessage {
+    // This implements the header format for RFC 1035
+    // Wireshark displays DNS headers as specified in RFC 2535
     fn deserialize(binarr: &[u8]) -> DNSMessage {
         let mut bin_header = binarr.iter();
 
         let id = u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-        dbg!(format!("{:x}", id));
 
-        let byte = *bin_header.next().unwrap();
-        dbg!(byte);
-        let qr = byte >> 7;
-        let opcode = (byte >> 3) & 15;
-        let aa = (byte >> 2) & 1;
-        let tc = (byte >> 1) & 1;
-        let rd = byte & 1;
-
-        let byte = *bin_header.next().unwrap();
-        dbg!(format!("{:x}", byte));
-        let ra = (byte >> 7) & 1;
-        let z = (byte >> 4) & 7;
-        let rcode = byte & 15;
+        let (qr, opcode, aa, tc, rd, ra, z, rcode) =
+            DNSMessage::parse_bits([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
 
         let qdcount =
             u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
@@ -72,6 +62,19 @@ impl DNSMessage {
                 arcount,
             },
         }
+    }
+
+    fn parse_bits(twobyte: [u8; 2]) -> (u8, u8, u8, u8, u8, u8, u8, u8) {
+        (
+            twobyte[0] >> 7,
+            (twobyte[0] >> 3) & 15,
+            (twobyte[0] >> 2) & 1,
+            (twobyte[0] >> 1) & 1,
+            twobyte[0] & 1,
+            (twobyte[1] >> 7) & 1,
+            (twobyte[1] >> 4) & 7,
+            twobyte[1] & 15,
+        )
     }
 
     fn serialize(&self) -> Vec<u8> {
