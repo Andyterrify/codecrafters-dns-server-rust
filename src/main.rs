@@ -1,7 +1,7 @@
 // Uncomment this block to pass the first stage
 use std::{io::Write, net::UdpSocket};
 
-use bytes::BufMut;
+use bytes::{Buf, BufMut};
 
 #[derive(Debug)]
 struct DNSMessage {
@@ -11,6 +11,15 @@ struct DNSMessage {
 #[derive(Debug)]
 struct DNSHeader {
     id: u16,
+    flags: Flags,
+    qdcount: u16,
+    ancount: u16,
+    nscount: u16,
+    arcount: u16,
+}
+
+#[derive(Debug)]
+struct Flags {
     qr: u8,
     opcode: u8,
     aa: u8,
@@ -19,92 +28,81 @@ struct DNSHeader {
     ra: u8,
     z: u8,
     rcode: u8,
-    qdcount: u16,
-    ancount: u16,
-    nscount: u16,
-    arcount: u16,
 }
 
 impl DNSMessage {
     // This implements the header format for RFC 1035
     // Wireshark displays DNS headers as specified in RFC 2535
     fn deserialize(binarr: &[u8]) -> DNSMessage {
-        let mut bin_header = binarr.iter();
+        let header = DNSHeader::deserialize(binarr.take(12).into_inner());
 
-        let id = u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-
-        let (qr, opcode, aa, tc, rd, ra, z, rcode) =
-            DNSMessage::parse_bits([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-
-        let qdcount =
-            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-        let ancount =
-            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-        let nscount =
-            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-        let arcount =
-            u16::from_be_bytes([*bin_header.next().unwrap(), *bin_header.next().unwrap()]);
-
-        DNSMessage {
-            header: DNSHeader {
-                id,
-                qr,
-                opcode,
-                aa,
-                tc,
-                rd,
-                ra,
-                z,
-                rcode,
-                qdcount,
-                ancount,
-                nscount,
-                arcount,
-            },
-        }
-    }
-
-    fn parse_bits(twobyte: [u8; 2]) -> (u8, u8, u8, u8, u8, u8, u8, u8) {
-        (
-            twobyte[0] >> 7,
-            (twobyte[0] >> 3) & 15,
-            (twobyte[0] >> 2) & 1,
-            (twobyte[0] >> 1) & 1,
-            twobyte[0] & 1,
-            (twobyte[1] >> 7) & 1,
-            (twobyte[1] >> 4) & 7,
-            twobyte[1] & 15,
-        )
+        DNSMessage { header }
     }
 
     fn serialize(&self) -> Vec<u8> {
         let mut buffer = vec![].writer();
-        let header = &self.header;
-
-        dbg!(&header);
-        buffer.write_all(&header.id.to_be_bytes()).unwrap();
-
-        buffer
-            .write(&[header.qr << 7
-                | header.opcode << 3
-                | header.aa << 3
-                | header.tc << 2
-                | header.rd])
-            .unwrap();
-        buffer
-            .write(&[(header.ra << 7 | header.z << 4 | header.rcode)])
-            .unwrap();
-
-        buffer.write_all(&header.qdcount.to_be_bytes()).unwrap();
-        buffer.write_all(&header.ancount.to_be_bytes()).unwrap();
-        buffer.write_all(&header.nscount.to_be_bytes()).unwrap();
-        buffer.write_all(&header.arcount.to_be_bytes()).unwrap();
+        buffer.write_all(&self.header.serialize()).unwrap();
 
         buffer.into_inner()
     }
 
     fn to_response(&mut self) {
-        self.header.qr = 1
+        self.header.to_response();
+    }
+}
+
+impl DNSHeader {
+    fn deserialize(bin_header: &[u8]) -> Self {
+        DNSHeader {
+            id: u16::from_be_bytes([bin_header[0], bin_header[1]]),
+            flags: Flags::deserialize([bin_header[2], bin_header[3]]),
+            qdcount: u16::from_be_bytes([bin_header[4], bin_header[5]]),
+            ancount: u16::from_be_bytes([bin_header[6], bin_header[7]]),
+            nscount: u16::from_be_bytes([bin_header[8], bin_header[9]]),
+            arcount: u16::from_be_bytes([bin_header[10], bin_header[11]]),
+        }
+    }
+    fn serialize(&self) -> Vec<u8> {
+        let mut buffer = vec![].writer();
+        buffer.write_all(&self.id.to_be_bytes()).unwrap();
+
+        buffer.write_all(&self.flags.serialize()).unwrap();
+
+        buffer.write_all(&self.qdcount.to_be_bytes()).unwrap();
+        buffer.write_all(&self.ancount.to_be_bytes()).unwrap();
+        buffer.write_all(&self.nscount.to_be_bytes()).unwrap();
+        buffer.write_all(&self.arcount.to_be_bytes()).unwrap();
+
+        buffer.into_inner()
+    }
+    fn to_response(&mut self) {
+        self.flags.qr = 1;
+    }
+}
+
+impl Flags {
+    fn deserialize(twobyte: [u8; 2]) -> Self {
+        Flags {
+            qr: twobyte[0] >> 7,
+            opcode: (twobyte[0] >> 3) & 15,
+            aa: (twobyte[0] >> 2) & 1,
+            tc: (twobyte[0] >> 1) & 1,
+            rd: twobyte[0] & 1,
+            ra: (twobyte[1] >> 7) & 1,
+            z: (twobyte[1] >> 4) & 7,
+            rcode: twobyte[1] & 15,
+        }
+    }
+    fn serialize(&self) -> Vec<u8> {
+        let mut buffer = vec![].writer();
+        buffer
+            .write(&[self.qr << 7 | self.opcode << 3 | self.aa << 3 | self.tc << 2 | self.rd])
+            .unwrap();
+        buffer
+            .write(&[(self.ra << 7 | self.z << 4 | self.rcode)])
+            .unwrap();
+
+        buffer.into_inner()
     }
 }
 
