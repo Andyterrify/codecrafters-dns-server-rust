@@ -1,8 +1,6 @@
 // Uncomment this block to pass the first stage
 use std::{io::Write, net::UdpSocket};
 
-use rand::seq::index;
-
 struct DataWrapper<'a> {
     data: &'a [u8],
     pos: usize,
@@ -16,16 +14,6 @@ struct DNSLabel {
 impl<'a> DataWrapper<'a> {
     fn new(data: &'a [u8]) -> Self {
         DataWrapper { data, pos: 0 }
-    }
-
-    fn next(&mut self) -> Option<&u8> {
-        if self.pos < self.data.len() {
-            let byte = &self.data[self.pos];
-            self.pos += 1;
-            Some(byte)
-        } else {
-            None
-        }
     }
 
     fn seek(&mut self, pos: usize) -> Option<()> {
@@ -164,6 +152,17 @@ impl DNSQuery {
             qclass: buf.get_u16(),
         })
     }
+
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        self.qname.parts.iter().for_each(|x| {
+            buf.push(x.len() as u8);
+            buf.write_all(x.as_bytes()).unwrap()
+        });
+
+        buf.write(&[0x0]).unwrap();
+        buf.write(&self.qtype.to_be_bytes()).unwrap();
+        buf.write(&self.qclass.to_be_bytes()).unwrap();
+    }
 }
 
 impl DNSMessage {
@@ -190,8 +189,9 @@ impl DNSMessage {
         let mut buffer = vec![];
         buffer.write_all(&self.header.serialize()).unwrap();
 
-        dbg!(self);
+        self.queries.iter().for_each(|q| q.serialize(&mut buffer));
 
+        dbg!(&buffer);
         buffer
     }
 
