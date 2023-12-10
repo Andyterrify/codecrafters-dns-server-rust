@@ -1,11 +1,130 @@
 // Uncomment this block to pass the first stage
 use std::{io::Write, net::UdpSocket};
 
-use bytes::{Buf, BufMut};
+use rand::seq::index;
+
+struct DataWrapper<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+#[derive(Debug, Clone)]
+struct DNSLabel {
+    parts: Vec<String>,
+}
+
+impl<'a> DataWrapper<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        DataWrapper { data, pos: 0 }
+    }
+
+    fn next(&mut self) -> Option<&u8> {
+        if self.pos < self.data.len() {
+            let byte = &self.data[self.pos];
+            self.pos += 1;
+            Some(byte)
+        } else {
+            None
+        }
+    }
+
+    fn seek(&mut self, pos: usize) -> Option<()> {
+        if pos > self.data.len() {
+            None
+        } else {
+            self.pos = pos;
+
+            Some(())
+        }
+    }
+
+    fn pos(&self) -> usize {
+        self.pos
+    }
+
+    fn get_u8(&mut self) -> u8 {
+        let byte = self.data[self.pos];
+        self.pos += 1;
+
+        byte
+    }
+
+    fn get_u16(&mut self) -> u16 {
+        u16::from_be_bytes([self.get_u8(), self.get_u8()])
+    }
+
+    fn peek(&mut self) -> Option<u8> {
+        if self.pos() + 1 > self.data.len() {
+            None
+        } else {
+            Some(self.data[self.pos() + 1])
+        }
+    }
+
+    fn follow_label(&mut self, follow_pointer: bool) -> DNSLabel {
+        let mut byte = self.get_u8();
+        let mut dns_label = DNSLabel { parts: vec![] };
+
+        loop {
+            if is_pointer(&[byte, self.peek().unwrap()]) & follow_pointer {
+                self.follow_pointer(&mut dns_label);
+            } else if byte != 0x0 {
+                match String::from_utf8(self.take(byte as usize).to_vec()) {
+                    Ok(label) => dns_label.parts.push(label),
+                    Err(_) => todo!(),
+                }
+            } else {
+                break;
+            }
+
+            byte = self.get_u8();
+        }
+
+        dns_label
+    }
+
+    fn follow_pointer(&mut self, dns_label: &mut DNSLabel) {
+        let temp_pointer = self.pos;
+        self.seek(self.pos - 1); // move back to beginning of double
+
+        let mut index = self.get_u16() & 0x3FFF;
+
+        loop {
+            self.seek(index as usize);
+
+            let label = self.follow_label(false);
+            label
+                .parts
+                .into_iter()
+                .for_each(|x| dns_label.parts.push(x));
+
+            self.pos = temp_pointer;
+
+            if self.peek().unwrap() == 0x0 {
+                break;
+            } else {
+                index = self.get_u16() & 0x3FFF;
+            }
+        }
+
+        todo!()
+    }
+
+    fn take(&mut self, amount: usize) -> &[u8] {
+        let buf = &self.data[self.pos..self.pos + amount];
+        self.seek(self.pos + amount);
+        buf
+    }
+}
+
+fn is_pointer(data: &[u8; 2]) -> bool {
+    (((data[0] as u16) << 7) | data[1] as u16) & 0xc000 == 0xc000
+}
 
 #[derive(Debug)]
 struct DNSMessage {
     header: DNSHeader,
+    queries: Vec<DNSQuery>,
 }
 
 #[derive(Debug)]
@@ -30,22 +149,50 @@ struct Flags {
     rcode: u8,
 }
 
+#[derive(Debug, Clone)]
+struct DNSQuery {
+    qname: DNSLabel,
+    qtype: u16,
+    qclass: u16,
+}
+
+impl DNSQuery {
+    fn deserialize(buf: &mut DataWrapper) -> Option<DNSQuery> {
+        Some(DNSQuery {
+            qname: buf.follow_label(true),
+            qtype: buf.get_u16(),
+            qclass: buf.get_u16(),
+        })
+    }
+}
+
 impl DNSMessage {
     // This implements the header format for RFC 1035
     // Wireshark displays DNS headers as specified in RFC 2535
-    fn deserialize(binarr: &[u8]) -> DNSMessage {
-        let header = DNSHeader::deserialize(binarr.take(12).into_inner());
+    fn deserialize(mut data: DataWrapper) -> DNSMessage {
+        let mut message = DNSMessage {
+            header: DNSHeader::deserialize(&mut data),
+            queries: vec![],
+        };
 
-        DNSMessage { header }
+        for _ in [0..message.header.qdcount] {
+            match DNSQuery::deserialize(&mut data) {
+                Some(q) => message.queries.push(q),
+                None => todo!(),
+            }
+        }
+
+        dbg!(&message);
+        message
     }
 
     fn serialize(&self) -> Vec<u8> {
-        let mut buffer = vec![].writer();
+        let mut buffer = vec![];
         buffer.write_all(&self.header.serialize()).unwrap();
 
         dbg!(self);
 
-        buffer.into_inner()
+        buffer
     }
 
     fn to_response(&mut self) {
@@ -54,18 +201,18 @@ impl DNSMessage {
 }
 
 impl DNSHeader {
-    fn deserialize(bin_header: &[u8]) -> Self {
+    fn deserialize(buf: &mut DataWrapper) -> Self {
         DNSHeader {
-            id: u16::from_be_bytes([bin_header[0], bin_header[1]]),
-            flags: Flags::deserialize([bin_header[2], bin_header[3]]),
-            qdcount: u16::from_be_bytes([bin_header[4], bin_header[5]]),
-            ancount: u16::from_be_bytes([bin_header[6], bin_header[7]]),
-            nscount: u16::from_be_bytes([bin_header[8], bin_header[9]]),
-            arcount: u16::from_be_bytes([bin_header[10], bin_header[11]]),
+            id: buf.get_u16(),
+            flags: Flags::deserialize(buf.get_u16()),
+            qdcount: buf.get_u16(),
+            ancount: buf.get_u16(),
+            nscount: buf.get_u16(),
+            arcount: buf.get_u16(),
         }
     }
     fn serialize(&self) -> Vec<u8> {
-        let mut buffer = vec![].writer();
+        let mut buffer = vec![];
         buffer.write_all(&self.id.to_be_bytes()).unwrap();
 
         buffer.write_all(&self.flags.serialize()).unwrap();
@@ -75,7 +222,7 @@ impl DNSHeader {
         buffer.write_all(&self.nscount.to_be_bytes()).unwrap();
         buffer.write_all(&self.arcount.to_be_bytes()).unwrap();
 
-        buffer.into_inner()
+        buffer
     }
     fn to_response(&mut self) {
         self.flags.qr = 1;
@@ -83,20 +230,20 @@ impl DNSHeader {
 }
 
 impl Flags {
-    fn deserialize(twobyte: [u8; 2]) -> Self {
+    fn deserialize(doublet: u16) -> Self {
         Flags {
-            qr: twobyte[0] >> 7,
-            opcode: (twobyte[0] >> 3) & 15,
-            aa: (twobyte[0] >> 2) & 1,
-            tc: (twobyte[0] >> 1) & 1,
-            rd: twobyte[0] & 1,
-            ra: (twobyte[1] >> 7) & 1,
-            z: (twobyte[1] >> 4) & 7,
-            rcode: twobyte[1] & 15,
+            qr: (doublet >> 15) as u8,
+            opcode: ((doublet >> 11) & 15) as u8,
+            aa: ((doublet >> 10) & 1) as u8,
+            tc: ((doublet >> 9) & 1) as u8,
+            rd: ((doublet >> 8) & 1) as u8,
+            ra: ((doublet >> 7) & 1) as u8,
+            z: ((doublet >> 4) & 7) as u8,
+            rcode: (doublet & 15) as u8,
         }
     }
     fn serialize(&self) -> Vec<u8> {
-        let mut buffer = vec![].writer();
+        let mut buffer = vec![];
         buffer
             .write(&[self.qr << 7 | self.opcode << 3 | self.aa << 3 | self.tc << 2 | self.rd])
             .unwrap();
@@ -104,7 +251,7 @@ impl Flags {
             .write(&[(self.ra << 7 | self.z << 4 | self.rcode)])
             .unwrap();
 
-        buffer.into_inner()
+        buffer
     }
 }
 
@@ -122,7 +269,9 @@ fn main() {
                 let _received_data = String::from_utf8_lossy(&buf[0..size]);
                 println!("Received {} bytes from {}", size, source);
 
-                let mut message = DNSMessage::deserialize(&buf);
+                let data = DataWrapper::new(&buf);
+
+                let mut message = DNSMessage::deserialize(data);
 
                 message.to_response();
                 let response = message.serialize();
