@@ -277,6 +277,10 @@ impl DNSMessage {
 
     fn to_response(&mut self) {
         self.header.to_response();
+        match self.header.flags.opcode {
+            OPCODE::QUERY => (),
+            _ => self.header.flags.rcode = RCODE::NotImplemented
+        }
     }
 }
 
@@ -396,7 +400,7 @@ impl DNSResource {
             class,
             ttl,
             rdlength,
-            rdata: vec![]
+            rdata: vec![],
         };
         Some((data, 1))
     }
@@ -416,7 +420,7 @@ impl DNSResource {
         buf.write_all(&self.ttl.to_be_bytes()).unwrap();
         buf.write_all(&self.rdlength.to_be_bytes()).unwrap();
 
-        for i in &self.rdata{
+        for i in &self.rdata {
             buf.write(&[*i]).unwrap();
         }
 
