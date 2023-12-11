@@ -454,7 +454,7 @@ fn main() {
 
                 let resource = DNSResource {
                     name: DNSLabel {
-                        parts: vec!["codecrafters".to_string(), "io".to_string()],
+                        parts: message.queries.get(0).unwrap().qname.parts.clone()
                     },
                     rtype: 1,
                     class: 1,
