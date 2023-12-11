@@ -403,17 +403,12 @@ impl DNSResource {
 
     fn serialize(&self) -> Option<(Vec<u8>, usize)> {
         let mut buf = vec![];
-
-        // self.name.parts.iter().for_each(|x| {
-        //     buf.push(x.len() as u8);
-        //     buf.write_all(x.as_bytes()).unwrap()
-        // });
-        // buf.write(b"0").unwrap();
-
-        buf.write(&[12]).unwrap();
-        buf.write(b"codecrafters").unwrap();
-        buf.write(&[2]).unwrap();
-        buf.write(b"io").unwrap();
+        self.name.parts.iter().for_each(|x| {
+            dbg!(x.len() as u8);
+            dbg!(x);
+            buf.write(&[x.len() as u8]).unwrap();
+            buf.write_all(x.as_bytes()).unwrap();
+        });
         buf.write(&[0]).unwrap();
 
         buf.write_all(&self.rtype.to_be_bytes()).unwrap();
