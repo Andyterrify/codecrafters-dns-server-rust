@@ -1,10 +1,10 @@
 // Uncomment this block to pass the first stage
-use std::{io::Write, net::UdpSocket};
+use std::{io::Write, net::UdpSocket, vec};
 
 // ## Traits
 trait ByteFunc<T> {
     fn deserialize(buf: &mut DataWrapper) -> Option<(T, usize)>;
-    fn serialize(&self, buf: &mut [u8]) -> Option<usize>;
+    fn serialize(&self) -> Option<(Vec<u8>, usize)>;
 }
 
 // ## Structs
@@ -23,6 +23,7 @@ struct DNSLabel {
 struct DNSMessage {
     header: DNSHeader,
     queries: Vec<DNSQuery>,
+    resources: Vec<DNSResource>,
 }
 
 #[derive(Debug)]
@@ -44,7 +45,7 @@ struct Flags {
     rd: bool,
     ra: bool,
     z: u8,
-    rcode: u8,
+    rcode: RCODE,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +53,16 @@ struct DNSQuery {
     qname: DNSLabel,
     qtype: u16,
     qclass: u16,
+}
+
+#[derive(Debug)]
+struct DNSResource {
+    name: DNSLabel,
+    rtype: u16,
+    class: u16,
+    ttl: u32,
+    rdlength: u16,
+    rdata: Vec<u8>,
 }
 
 // ## Enums
@@ -72,6 +83,11 @@ enum RCODE {
     NotImplemented,
     Refused,
     Reserved(u8),
+}
+
+#[derive(Debug)]
+enum RData {
+    IP(),
 }
 
 // ## Implementations
@@ -175,34 +191,6 @@ impl<'a> DataWrapper<'a> {
     }
 }
 
-impl ByteFunc<DNSQuery> for DNSQuery {
-    fn deserialize(buf: &mut DataWrapper) -> Option<(DNSQuery, usize)> {
-        Some((
-            DNSQuery {
-                qname: buf.follow_label(true),
-                qtype: buf.get_u16(),
-                qclass: buf.get_u16(),
-            },
-            buf.read,
-        ))
-    }
-
-    fn serialize(&self, buf: &mut [u8]) -> Option<usize> {
-        let mut buf = vec![];
-
-        self.qname.parts.iter().for_each(|x| {
-            buf.push(x.len() as u8);
-            buf.write_all(x.as_bytes()).unwrap()
-        });
-
-        buf.write(&[0x0]).unwrap();
-        buf.write(&self.qtype.to_be_bytes()).unwrap();
-        buf.write(&self.qclass.to_be_bytes()).unwrap();
-
-        Some(buf.len())
-    }
-}
-
 impl OPCODE {
     fn deserialize(bin_code: u8) -> OPCODE {
         match bin_code {
@@ -252,10 +240,13 @@ impl RCODE {
 impl DNSMessage {
     // This implements the header format for RFC 1035
     // Wireshark displays DNS headers as specified in RFC 2535
-    fn deserialize(mut data: DataWrapper) -> DNSMessage {
+    fn deserialize(buffer: &[u8]) -> DNSMessage {
+        let mut data = DataWrapper::new(buffer);
+
         let mut message = DNSMessage {
-            header: DNSHeader::deserialize(&mut data),
+            header: DNSHeader::deserialize(&mut data).unwrap().0,
             queries: vec![],
+            resources: vec![],
         };
 
         for _ in [0..message.header.qdcount] {
@@ -265,19 +256,22 @@ impl DNSMessage {
             }
         }
 
-        dbg!(&message);
         message
     }
 
     fn serialize(&self) -> Vec<u8> {
         let mut buffer = vec![];
-        buffer.write_all(&self.header.serialize()).unwrap();
+
+        buffer.extend_from_slice(&self.header.serialize().unwrap().0);
 
         self.queries.iter().for_each(|q| {
-            let _ = q.serialize(&mut buffer);
+            buffer.extend_from_slice(&q.serialize().unwrap().0);
         });
 
-        dbg!(&buffer);
+        self.resources.iter().for_each(|x| {
+            buffer.extend_from_slice(&x.serialize().unwrap().0);
+        });
+
         buffer
     }
 
@@ -287,64 +281,154 @@ impl DNSMessage {
 }
 
 impl DNSHeader {
-    fn deserialize(buf: &mut DataWrapper) -> Self {
-        DNSHeader {
-            id: buf.get_u16(),
-            flags: Flags::deserialize(buf.get_u16()),
-            qdcount: buf.get_u16(),
-            ancount: buf.get_u16(),
-            nscount: buf.get_u16(),
-            arcount: buf.get_u16(),
-        }
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        let mut buffer = vec![];
-        buffer.write_all(&self.id.to_be_bytes()).unwrap();
-
-        buffer.write_all(&self.flags.serialize()).unwrap();
-
-        buffer.write_all(&self.qdcount.to_be_bytes()).unwrap();
-        buffer.write_all(&self.ancount.to_be_bytes()).unwrap();
-        buffer.write_all(&self.nscount.to_be_bytes()).unwrap();
-        buffer.write_all(&self.arcount.to_be_bytes()).unwrap();
-
-        buffer
-    }
-
     fn to_response(&mut self) {
         self.flags.qr = true;
     }
 }
 
-impl Flags {
-    fn deserialize(doublet: u16) -> Self {
-        Flags {
-            qr: ((doublet >> 15) as u8) == 1,
-            opcode: OPCODE::deserialize(((doublet >> 11) & 15) as u8),
-            aa: (((doublet >> 10) & 1) as u8) == 1,
-            tc: (((doublet >> 9) & 1) as u8) == 1,
-            rd: (((doublet >> 8) & 1) as u8) == 1,
-            ra: (((doublet >> 7) & 1) as u8) == 1,
-            z: ((doublet >> 4) & 7) as u8,
-            rcode: (doublet & 15) as u8,
-        }
+impl ByteFunc<DNSQuery> for DNSQuery {
+    fn deserialize(buf: &mut DataWrapper) -> Option<(DNSQuery, usize)> {
+        Some((
+            DNSQuery {
+                qname: buf.follow_label(true),
+                qtype: buf.get_u16(),
+                qclass: buf.get_u16(),
+            },
+            buf.read,
+        ))
     }
 
-    fn serialize(&self) -> Vec<u8> {
-        let mut buffer = vec![];
-        buffer
-            .write(&[(self.qr as u8) << 7
+    fn serialize(&self) -> Option<(Vec<u8>, usize)> {
+        let mut buf = vec![];
+
+        self.qname.parts.iter().for_each(|x| {
+            buf.push(x.len() as u8);
+            buf.write_all(x.as_bytes()).unwrap()
+        });
+
+        buf.write(&[0x0]).unwrap();
+        buf.write(&self.qtype.to_be_bytes()).unwrap();
+        buf.write(&self.qclass.to_be_bytes()).unwrap();
+
+        let len = buf.len();
+        Some((buf, len))
+    }
+}
+
+impl ByteFunc<DNSHeader> for DNSHeader {
+    fn deserialize(buf: &mut DataWrapper) -> Option<(DNSHeader, usize)> {
+        Some((
+            DNSHeader {
+                id: buf.get_u16(),
+                flags: Flags::deserialize(&mut DataWrapper::new(&[buf.get_u8(), buf.get_u8()]))
+                    .unwrap()
+                    .0,
+                qdcount: buf.get_u16(),
+                ancount: buf.get_u16(),
+                nscount: buf.get_u16(),
+                arcount: buf.get_u16(),
+            },
+            12,
+        ))
+    }
+
+    fn serialize(&self) -> Option<(Vec<u8>, usize)> {
+        let mut buf = vec![];
+
+        buf.write_all(&self.id.to_be_bytes()).unwrap();
+
+        let flags = self.flags.serialize().unwrap().0;
+        buf.extend_from_slice(&flags);
+
+        buf.write_all(&self.qdcount.to_be_bytes()).unwrap();
+        buf.write_all(&self.ancount.to_be_bytes()).unwrap();
+        buf.write_all(&self.nscount.to_be_bytes()).unwrap();
+        buf.write_all(&self.arcount.to_be_bytes()).unwrap();
+
+        Some((buf, 12))
+    }
+}
+
+impl ByteFunc<Flags> for Flags {
+    fn deserialize(doublet: &mut DataWrapper<'_>) -> Option<(Flags, usize)> {
+        let doublet = doublet.get_u16();
+        Some((
+            Flags {
+                qr: ((doublet >> 15) as u8) == 1,
+                opcode: OPCODE::deserialize(((doublet >> 11) & 15) as u8),
+                aa: (((doublet >> 10) & 1) as u8) == 1,
+                tc: (((doublet >> 9) & 1) as u8) == 1,
+                rd: (((doublet >> 8) & 1) as u8) == 1,
+                ra: (((doublet >> 7) & 1) as u8) == 1,
+                z: ((doublet >> 4) & 7) as u8,
+                rcode: RCODE::deserialize((doublet & 15) as u8),
+            },
+            2,
+        ))
+    }
+
+    fn serialize(&self) -> Option<(Vec<u8>, usize)> {
+        let data = vec![
+            (self.qr as u8) << 7
                 | self.opcode.serialize() << 3
                 | (self.aa as u8) << 3
                 | (self.tc as u8) << 2
-                | (self.rd as u8)])
-            .unwrap();
-        buffer
-            .write(&[((self.ra as u8) << 7 | self.z << 4 | self.rcode)])
-            .unwrap();
+                | (self.rd as u8),
+            (self.ra as u8) << 7 | self.z << 4 | self.rcode.serialize(),
+        ];
 
-        buffer
+        Some((data, 2))
+    }
+}
+
+impl DNSResource {
+    fn deserialize(buf: &mut DataWrapper) -> Option<(DNSResource, usize)> {
+        let name = buf.follow_label(true);
+        let rtype = buf.get_u16();
+        let class = buf.get_u16();
+        let ttl = u32::from_be_bytes([buf.get_u8(), buf.get_u8(), buf.get_u8(), buf.get_u8()]);
+        let rdlength = buf.get_u16();
+        let rdata = buf.take(rdlength as usize);
+
+        let data = DNSResource {
+            name,
+            rtype,
+            class,
+            ttl,
+            rdlength,
+            rdata: vec![]
+        };
+        Some((data, 1))
+    }
+
+    fn serialize(&self) -> Option<(Vec<u8>, usize)> {
+        let mut buf = vec![];
+
+        // self.name.parts.iter().for_each(|x| {
+        //     buf.push(x.len() as u8);
+        //     buf.write_all(x.as_bytes()).unwrap()
+        // });
+        // buf.write(b"0").unwrap();
+
+        buf.write(&[12]).unwrap();
+        buf.write(b"codecrafters").unwrap();
+        buf.write(&[2]).unwrap();
+        buf.write(b"io").unwrap();
+        buf.write(&[0]).unwrap();
+
+        buf.write_all(&self.rtype.to_be_bytes()).unwrap();
+        buf.write_all(&self.class.to_be_bytes()).unwrap();
+        buf.write_all(&self.ttl.to_be_bytes()).unwrap();
+        buf.write_all(&self.rdlength.to_be_bytes()).unwrap();
+
+        for i in &self.rdata{
+            buf.write(&[*i]).unwrap();
+        }
+
+        dbg!(&buf);
+
+        let len = buf.len();
+        Some((buf, len))
     }
 }
 
@@ -367,11 +451,24 @@ fn main() {
                 let _received_data = String::from_utf8_lossy(&buf[0..size]);
                 println!("Received {} bytes from {}", size, source);
 
-                let data = DataWrapper::new(&buf);
+                let mut message = DNSMessage::deserialize(&buf);
 
-                let mut message = DNSMessage::deserialize(data);
+                let resource = DNSResource {
+                    name: DNSLabel {
+                        parts: vec!["codecrafters".to_string(), "io".to_string()],
+                    },
+                    rtype: 1,
+                    class: 1,
+                    ttl: 2400,
+                    rdlength: 4,
+                    rdata: vec![8, 8, 8, 8],
+                };
 
                 message.to_response();
+                message.header.ancount = 1;
+                message.resources.push(resource);
+
+                dbg!(&message);
                 let response = message.serialize();
 
                 udp_socket
