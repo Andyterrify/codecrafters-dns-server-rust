@@ -1,25 +1,21 @@
 // Uncomment this block to pass the first stage
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    net::UdpSocket,
-};
+use std::{env::args, net::UdpSocket};
 
-use nom::AsBytes;
-use pretty_hex::PrettyHex;
+#[allow(dead_code)]
+#[allow(unused_variables)]
 
 #[derive(Debug)]
 struct DNSLabel<'a> {
     parts: Vec<&'a str>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DNSQuery {
     qname: Vec<u8>,
     qtype: u16,
     qclass: u16,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DNSResource {
     name: Vec<u8>,
     rtype: u16,
@@ -41,6 +37,23 @@ impl DNSResource {
         buf.extend_from_slice(&self.rdata);
 
         buf
+    }
+
+    fn from_wire(buf: &mut RawWrapper) -> Option<Self> {
+        Some(DNSResource {
+            name: buf.name_from_wire(),
+            rtype: buf.get_u16(),
+            class: buf.get_u16(),
+            ttl: buf.get_u32(),
+            rdlength: buf.get_u16(),
+            rdata: {
+                buf.seek(buf.pos() - 2);
+                let length = buf.get_u16();
+
+                buf.take_from(buf.pos(), buf.pos() + length as usize)
+                    .to_vec()
+            },
+        })
     }
 }
 
@@ -127,11 +140,6 @@ impl DNSQuery {
         buf.extend_from_slice(&self.qtype.to_be_bytes());
         buf.extend_from_slice(&self.qclass.to_be_bytes());
 
-        // dbg!(buf.hex_dump());
-        // dbg!(self.qname.hex_dump());
-        // dbg!(&self.qtype.to_be_bytes().hex_dump());
-        // dbg!(self.qclass.to_be_bytes().hex_dump());
-
         buf
     }
 }
@@ -192,7 +200,7 @@ impl RawWrapper {
 
     fn name_from_wire(&mut self) -> Vec<u8> {
         let mut dns_label = vec![];
-        let limit: usize = 64;
+        let _limit: usize = 64;
         let mut recursion = 0;
 
         let reference = self.pos();
@@ -203,12 +211,7 @@ impl RawWrapper {
         let mut byte = self.get_u8();
 
         loop {
-            dbg!("EMPTY LINE");
-            dbg!("");
-
-            dbg!(format!("Byte: {:x}", byte));
             if (((byte as u16) << 7 | self.peek() as u16) & 0xc000) == 0xC000 && !followed_pointer {
-                dbg!("11111");
                 // this is a pointer
                 followed_pointer = true;
                 recursion += 1;
@@ -232,13 +235,11 @@ impl RawWrapper {
                     )
                 }
             } else if (((byte as u16) << 7 | self.peek() as u16) & 0xc000) == 0xC000 {
-                dbg!("22222");
                 break;
                 // unimplemented!(
                 //     "Have not implemented logic in case we run into pointer after pointer"
                 // );
             } else if byte == 0 {
-                dbg!("33333");
                 if in_label {
                     in_label = false;
                     match self.pos() - reference > 63 {
@@ -252,18 +253,10 @@ impl RawWrapper {
 
                 break;
             } else if in_label {
-                dbg!("44444");
                 // todo this is a normal string
                 let length = byte as usize;
-                dbg!("got length", length);
-                dbg!(format!(
-                    "current_position {}# jumping to {}",
-                    self.pos(),
-                    self.pos() + length
-                ));
                 self.seek(self.pos() + length);
                 byte = self.get_u8();
-                dbg!(format!("next-byte {:x}", byte));
             }
         }
 
@@ -273,7 +266,7 @@ impl RawWrapper {
 
     fn take_from(&mut self, start: usize, end: usize) -> &[u8] {
         let buf = &self.data[start..end];
-        self.consumed += (end - start);
+        self.consumed += end - start;
         buf
     }
 }
@@ -293,16 +286,6 @@ struct DNSMessage {
     ans: Vec<DNSResource>,
     nsr: Vec<DNSResource>,
     arc: Vec<DNSResource>,
-}
-
-impl DNSMessage {
-    fn deserialize(buf: &mut RawWrapper) -> Option<DNSMessage> {
-        todo!()
-    }
-
-    fn serialize(&self) -> Option<Vec<u8>> {
-        todo!()
-    }
 }
 
 #[derive(Debug)]
@@ -340,20 +323,93 @@ impl DNSMessage {
     fn from_wire(&mut self) {
         // parse header information
         self.header.from_wire(&mut self.raw);
+        dbg!(&self.header);
 
         // parse queries
         let header = self.header.qdcount;
         let mut queries = vec![];
+        let mut answers = vec![];
 
         for _ in 0..header {
             let a = DNSQuery::from_wire(&mut self.raw).unwrap();
             queries.push(a);
         }
 
-        // dbg!(&self.queries);
-        self.queries = queries;
+        for _ in 0..self.header.ancount {
+            let a = DNSResource::from_wire(&mut self.raw).unwrap();
+            answers.push(a);
+        }
 
-        // dbg!(&self);
+        self.queries = queries;
+        self.ans = answers;
+    }
+
+    fn process_queries(&mut self, socket: &mut UdpSocket, resolver: Option<&String>) {
+        let _queries = &self.queries;
+
+        if self.header.opcode != OPCODE::QUERY {
+            self.header.rcode = RCODE::NotImplemented
+        }
+
+        let mut answers = vec![];
+        dbg!(resolver);
+
+        match resolver {
+            Some(res) => {
+                let mut buf = [0; 512];
+
+                let mut shell = DNSMessage::new(&[]);
+                shell.queries = vec![self.queries[0].clone()];
+                shell.header.qdcount = 1;
+                let q = shell.to_wire();
+
+                socket.send_to(&q, res).expect("Failed to query resolver");
+                socket.recv_from(&mut buf).expect("Failed to read response");
+
+                let mut response = DNSMessage::new(&buf);
+
+                response.from_wire();
+                dbg!(&response.header);
+                dbg!(&response.queries);
+                dbg!(&response.ans);
+
+                self.ans.push(response.ans[0].clone());
+
+
+                let mut shell = DNSMessage::new(&[]);
+                shell.queries = vec![self.queries[1].clone()];
+                shell.header.qdcount = 1;
+                let q = shell.to_wire();
+
+                socket.send_to(&q, res).expect("Failed to query resolver");
+                socket.recv_from(&mut buf).expect("Failed to read response");
+
+                let mut response = DNSMessage::new(&buf);
+
+                response.from_wire();
+
+                self.ans.push(response.ans[0].clone());
+
+                self.header.ancount = self.ans.len() as u16;
+            }
+            None => {
+                for a in &self.queries {
+                    answers.push(DNSResource {
+                        name: a.qname.clone(),
+                        rtype: 1,
+                        class: 1,
+                        ttl: 127389,
+                        rdlength: 4,
+                        rdata: b"\x08\x08\x08\x08".to_vec(),
+                    })
+                }
+
+                self.header.ancount = answers.len() as u16;
+                self.ans = answers;
+            }
+        }
+
+        self.prepare_answer();
     }
 
     fn prepare_answer(&mut self) {
@@ -381,7 +437,7 @@ impl DNSMessage {
 impl DNSHeader {
     fn shell() -> Self {
         DNSHeader {
-            id: 0,
+            id: rand::random::<u16>(),
             qr: false,
             opcode: OPCODE::RESERVED(99),
             aa: false,
@@ -449,37 +505,6 @@ impl DNSHeader {
     }
 }
 
-// ## Functions
-fn is_pointer(data: &[u8; 2]) -> bool {
-    (((data[0] as u16) << 7) | data[1] as u16) & 0xc000 == 0xc000
-}
-
-fn process_queries(dns_message: &mut DNSMessage) {
-    let queries = &dns_message.queries;
-
-    if dns_message.header.opcode != OPCODE::QUERY {
-        dns_message.header.rcode = RCODE::NotImplemented
-    }
-
-    let mut answers = vec![];
-
-    for a in &dns_message.queries {
-        answers.push(DNSResource {
-            name: a.qname.clone(),
-            rtype: 1,
-            class: 1,
-            ttl: 127389,
-            rdlength: 4,
-            rdata: b"\x08\x08\x08\x08".to_vec(),
-        })
-    }
-
-    dns_message.header.ancount = answers.len() as u16;
-    dns_message.ans = answers;
-
-    dns_message.prepare_answer();
-}
-
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
@@ -487,6 +512,10 @@ fn main() {
     // Uncomment this block to pass the first stage
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
+
+    let args = args().collect::<Vec<String>>();
+    let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
+    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
     loop {
         match udp_socket.recv_from(&mut buf) {
@@ -500,8 +529,7 @@ fn main() {
                 let mut ndns = DNSMessage::new(&buf);
 
                 ndns.from_wire();
-
-                process_queries(&mut ndns);
+                ndns.process_queries(&mut res_socket, res_addr);
 
                 // dbg!(&ndns);
 
