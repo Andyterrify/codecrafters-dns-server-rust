@@ -1,5 +1,6 @@
 // Uncomment this block to pass the first stage
 use std::{
+    env::args,
     fs::File,
     io::{BufWriter, Write},
     net::UdpSocket,
@@ -12,7 +13,7 @@ use pretty_hex::PrettyHex;
 struct DNSLabel<'a> {
     parts: Vec<&'a str>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DNSQuery {
     qname: Vec<u8>,
     qtype: u16,
@@ -295,16 +296,6 @@ struct DNSMessage {
     arc: Vec<DNSResource>,
 }
 
-impl DNSMessage {
-    fn deserialize(buf: &mut RawWrapper) -> Option<DNSMessage> {
-        todo!()
-    }
-
-    fn serialize(&self) -> Option<Vec<u8>> {
-        todo!()
-    }
-}
-
 #[derive(Debug)]
 struct DNSHeader {
     id: u16,
@@ -356,6 +347,51 @@ impl DNSMessage {
         // dbg!(&self);
     }
 
+    fn process_queries(&mut self, socket: &mut UdpSocket, resolver: Option<&String>) {
+        let queries = &self.queries;
+
+        if self.header.opcode != OPCODE::QUERY {
+            self.header.rcode = RCODE::NotImplemented
+        }
+
+        let mut answers = vec![];
+
+        match resolver {
+            Some(res) => {
+                let mut buf = [0; 512];
+
+                let q = &self.to_wire();
+
+                dbg!(resolver);
+
+                socket
+                    .send_to(&q, res)
+                    .expect("Failed to query resolver");
+                socket.recv_from(&mut buf).expect("Failed to read response");
+
+                let response = DNSMessage::new(&buf);
+                self.ans = response.ans;
+            }
+            None => {
+                for a in &self.queries {
+                    answers.push(DNSResource {
+                        name: a.qname.clone(),
+                        rtype: 1,
+                        class: 1,
+                        ttl: 127389,
+                        rdlength: 4,
+                        rdata: b"\x08\x08\x08\x08".to_vec(),
+                    })
+                }
+
+                self.header.ancount = answers.len() as u16;
+                self.ans = answers;
+            }
+        }
+
+        self.prepare_answer();
+    }
+
     fn prepare_answer(&mut self) {
         self.header.qr = true;
     }
@@ -381,7 +417,7 @@ impl DNSMessage {
 impl DNSHeader {
     fn shell() -> Self {
         DNSHeader {
-            id: 0,
+            id: rand::random::<u16>(),
             qr: false,
             opcode: OPCODE::RESERVED(99),
             aa: false,
@@ -454,32 +490,6 @@ fn is_pointer(data: &[u8; 2]) -> bool {
     (((data[0] as u16) << 7) | data[1] as u16) & 0xc000 == 0xc000
 }
 
-fn process_queries(dns_message: &mut DNSMessage) {
-    let queries = &dns_message.queries;
-
-    if dns_message.header.opcode != OPCODE::QUERY {
-        dns_message.header.rcode = RCODE::NotImplemented
-    }
-
-    let mut answers = vec![];
-
-    for a in &dns_message.queries {
-        answers.push(DNSResource {
-            name: a.qname.clone(),
-            rtype: 1,
-            class: 1,
-            ttl: 127389,
-            rdlength: 4,
-            rdata: b"\x08\x08\x08\x08".to_vec(),
-        })
-    }
-
-    dns_message.header.ancount = answers.len() as u16;
-    dns_message.ans = answers;
-
-    dns_message.prepare_answer();
-}
-
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
@@ -487,6 +497,10 @@ fn main() {
     // Uncomment this block to pass the first stage
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
+
+    let args = args().collect::<Vec<String>>();
+    let res_addr = if args.len() > 2 { Some(&args[1]) } else { None };
+    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
     loop {
         match udp_socket.recv_from(&mut buf) {
@@ -500,8 +514,7 @@ fn main() {
                 let mut ndns = DNSMessage::new(&buf);
 
                 ndns.from_wire();
-
-                process_queries(&mut ndns);
+                ndns.process_queries(&mut res_socket, res_addr);
 
                 // dbg!(&ndns);
 
