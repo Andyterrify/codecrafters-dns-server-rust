@@ -1,6 +1,11 @@
 // Uncomment this block to pass the first stage
-use std::{borrow::Cow, collections::HashMap, io::Write, net::UdpSocket, vec};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    net::UdpSocket,
+};
 
+use nom::AsBytes;
 use pretty_hex::PrettyHex;
 
 #[derive(Debug)]
@@ -16,7 +21,7 @@ struct DNSQuery {
 
 #[derive(Debug)]
 struct DNSResource {
-    name: String,
+    name: Vec<u8>,
     rtype: u16,
     class: u16,
     ttl: u32,
@@ -24,8 +29,23 @@ struct DNSResource {
     rdata: Vec<u8>,
 }
 
+impl DNSResource {
+    fn to_wire(&self) -> Vec<u8> {
+        let mut buf = vec![];
+
+        buf.extend_from_slice(&self.name);
+        buf.extend_from_slice(&self.rtype.to_be_bytes());
+        buf.extend_from_slice(&self.class.to_be_bytes());
+        buf.extend_from_slice(&self.ttl.to_be_bytes());
+        buf.extend_from_slice(&self.rdlength.to_be_bytes());
+        buf.extend_from_slice(&self.rdata);
+
+        buf
+    }
+}
+
 // ## Enums
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum OPCODE {
     QUERY,
     IQUERY,
@@ -108,9 +128,9 @@ impl DNSQuery {
         buf.extend_from_slice(&self.qclass.to_be_bytes());
 
         // dbg!(buf.hex_dump());
-        dbg!(self.qname.hex_dump());
-        dbg!(&self.qtype.to_be_bytes().hex_dump());
-        dbg!(self.qclass.to_be_bytes().hex_dump());
+        // dbg!(self.qname.hex_dump());
+        // dbg!(&self.qtype.to_be_bytes().hex_dump());
+        // dbg!(self.qclass.to_be_bytes().hex_dump());
 
         buf
     }
@@ -183,6 +203,9 @@ impl RawWrapper {
         let mut byte = self.get_u8();
 
         loop {
+            dbg!("EMPTY LINE");
+            dbg!("");
+
             dbg!(format!("Byte: {:x}", byte));
             if (((byte as u16) << 7 | self.peek() as u16) & 0xc000) == 0xC000 && !followed_pointer {
                 dbg!("11111");
@@ -320,12 +343,15 @@ impl DNSMessage {
 
         // parse queries
         let header = self.header.qdcount;
-        let queries: Vec<DNSQuery> = vec![];
+        let mut queries = vec![];
 
-        [0..header].iter().for_each(|_| {
+        for _ in 0..header {
             let a = DNSQuery::from_wire(&mut self.raw).unwrap();
-            self.queries.push(a)
-        });
+            queries.push(a);
+        }
+
+        // dbg!(&self.queries);
+        self.queries = queries;
 
         // dbg!(&self);
     }
@@ -335,8 +361,6 @@ impl DNSMessage {
     }
 
     fn to_wire(&mut self) -> Vec<u8> {
-        self.prepare_answer();
-
         let mut buf = vec![];
 
         let header_wire = self.header.to_wire();
@@ -344,6 +368,10 @@ impl DNSMessage {
 
         for q in &self.queries {
             buf.extend_from_slice(&q.to_wire());
+        }
+
+        for ans in &self.ans {
+            buf.extend_from_slice(&ans.to_wire());
         }
 
         buf
@@ -426,6 +454,32 @@ fn is_pointer(data: &[u8; 2]) -> bool {
     (((data[0] as u16) << 7) | data[1] as u16) & 0xc000 == 0xc000
 }
 
+fn process_queries(dns_message: &mut DNSMessage) {
+    let queries = &dns_message.queries;
+
+    if dns_message.header.opcode != OPCODE::QUERY {
+        dns_message.header.rcode = RCODE::NotImplemented
+    }
+
+    let mut answers = vec![];
+
+    for a in &dns_message.queries {
+        answers.push(DNSResource {
+            name: a.qname.clone(),
+            rtype: 1,
+            class: 1,
+            ttl: 127389,
+            rdlength: 4,
+            rdata: b"\x08\x08\x08\x08".to_vec(),
+        })
+    }
+
+    dns_message.header.ancount = answers.len() as u16;
+    dns_message.ans = answers;
+
+    dns_message.prepare_answer();
+}
+
 fn main() {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     println!("Logs from your program will appear here!");
@@ -442,51 +496,18 @@ fn main() {
                 println!("Received {} bytes from {}", size, source);
                 // dbg!(buf);
 
-                dbg!(buf.hex_dump());
-                let raw_wrapper = RawWrapper::new(&buf);
+                // dbg!(buf.hex_dump());
                 let mut ndns = DNSMessage::new(&buf);
 
                 ndns.from_wire();
+
+                process_queries(&mut ndns);
+
+                // dbg!(&ndns);
+
                 let response = ndns.to_wire();
 
-                dbg!(response.hex_dump());
-
-                // let mut message = NDNSMessage::deserialize(buf);
-
-                // let resource = DNSResource {
-                //     name: DNSLabel {
-                //         parts: message.queries.get(0).unwrap().qname.parts.clone(),
-                //     },
-                //     rtype: 1,
-                //     class: 1,
-                //     ttl: 2400,
-                //     rdlength: 4,
-                //     rdata: vec![8, 8, 8, 8],
-                // };
-                // // dbg!(&message);
-                //
-                // message.to_response();
-                // message.header.ancount = message.header.qdcount;
-                // message.resources.push(resource);
-                //
-                // [0..message.header.ancount]
-                //     .iter()
-                //     .enumerate()
-                //     .for_each(|(x, _)| {
-                //         message.resources.push(DNSResource {
-                //             name: DNSLabel {
-                //                 parts: message.queries.get(x).unwrap().qname.parts.clone(),
-                //             },
-                //             rtype: 1,
-                //             class: 1,
-                //             ttl: 2400,
-                //             rdlength: 4,
-                //             rdata: vec![8, 8, 8, 8],
-                //         })
-                //     });
-
-                // dbg!(&message);
-                // let response = message.serialize();
+                // dbg!(response.hex_dump());
 
                 udp_socket
                     .send_to(&response, source)
