@@ -497,17 +497,17 @@ fn main() {
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
 
-    let args = args().collect::<Vec<String>>();
-    // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
-    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
+    // let args = args().collect::<Vec<String>>();
+    // // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
+    // let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
-    let mut res_addr = None;
+    // let mut res_addr = None;
 
-    for arg in std::env::args() {
-        if arg == "--resolver" {
-            res_addr = Some(std::env::args().nth(2).unwrap());
-        }
-    }
+    // for arg in std::env::args() {
+    //     if arg == "--resolver" {
+    //         res_addr = Some(std::env::args().nth(2).unwrap());
+    //     }
+    // }
 
     loop {
         match udp_socket.recv_from(&mut buf) {
@@ -521,11 +521,11 @@ fn main() {
                 let mut ndns = DNSMessage::new(&buf);
 
                 ndns.from_wire();
-                ndns.process_queries(&mut res_socket, res_addr.as_ref());
+                // ndns.process_queries(&mut res_socket, res_addr.as_ref());
 
                 // dbg!(&ndns);
 
-                let response = ndns.to_wire();
+                let response = buf;
 
                 // dbg!(response.hex_dump());
 
