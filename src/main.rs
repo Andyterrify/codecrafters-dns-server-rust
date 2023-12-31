@@ -1,5 +1,5 @@
 // Uncomment this block to pass the first stage
-use std::{env::args, net::UdpSocket};
+use std::{env::args, fs::File, io::Read, net::UdpSocket};
 
 #[allow(dead_code, unused_variables, unused_assignments)]
 #[derive(Debug)]
@@ -320,11 +320,12 @@ impl DNSMessage {
         dbg!(&self.header);
 
         // parse queries
-        let header = self.header.qdcount;
         let mut queries = vec![];
         let mut answers = vec![];
 
-        for _ in 0..header {
+        dbg!(self.header.qdcount);
+        for _ in 0..self.header.qdcount {
+            dbg!("Processing query...");
             let a = DNSQuery::from_wire(&mut self.raw).unwrap();
             queries.push(a);
         }
@@ -494,49 +495,58 @@ fn main() {
     println!("Logs from your program will appear here!");
 
     // Uncomment this block to pass the first stage
-    let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
-    let mut buf = [0; 512];
+    // let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
+    // let mut buf = [0; 512];
 
-    let args = args().collect::<Vec<String>>();
-    // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
-    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
+    // let args = args().collect::<Vec<String>>();
+    // // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
+    // let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
-    let mut res_addr = None;
+    // let mut res_addr = None;
 
-    for arg in std::env::args() {
-        if arg == "--resolver" {
-            res_addr = Some(std::env::args().nth(2).unwrap());
-        }
-    }
+    // for arg in std::env::args() {
+    //     if arg == "--resolver" {
+    //         res_addr = Some(std::env::args().nth(2).unwrap());
+    //     }
+    // }
 
-    loop {
-        match udp_socket.recv_from(&mut buf) {
-            Ok((size, source)) => {
-                let _received_data = String::from_utf8_lossy(&buf[0..size]);
+    let mut f = File::open("query_raw.txt").unwrap();
+    let mut buffer = [0; 512];
+    let a = f.read(&mut buffer).unwrap();
+    dbg!(buffer);
 
-                println!("Received {} bytes from {}", size, source);
-                // dbg!(buf);
+    let mut ndns = DNSMessage::new(&buffer);
+    ndns.from_wire();
+    dbg!(ndns);
 
-                // dbg!(buf.hex_dump());
-                let mut ndns = DNSMessage::new(&buf);
-
-                ndns.from_wire();
-                ndns.process_queries(&mut res_socket, res_addr.as_ref());
-
-                // dbg!(&ndns);
-
-                let response = ndns.to_wire();
-
-                // dbg!(response.hex_dump());
-
-                udp_socket
-                    .send_to(&response, source)
-                    .expect("Failed to send response");
-            }
-            Err(e) => {
-                eprintln!("Error receiving data: {}", e);
-                break;
-            }
-        }
-    }
+    // loop {
+    //     match udp_socket.recv_from(&mut buf) {
+    //         Ok((size, source)) => {
+    //             let _received_data = String::from_utf8_lossy(&buf[0..size]);
+    //
+    //             println!("Received {} bytes from {}", size, source);
+    //             // dbg!(buf);
+    //
+    //             // dbg!(buf.hex_dump());
+    //             let mut ndns = DNSMessage::new(&buf);
+    //
+    //             ndns.from_wire();
+    //             // ndns.process_queries(&mut res_socket, res_addr.as_ref());
+    //
+    //             // dbg!(&ndns);
+    //
+    //             let response = buf;
+    //
+    //             // dbg!(response.hex_dump());
+    //
+    //             udp_socket
+    //                 .send_to(&response, source)
+    //                 .expect("Failed to send response");
+    //         }
+    //         Err(e) => {
+    //             eprintln!("Error receiving data: {}", e);
+    //             break;
+    //         }
+    //     }
+    // }
 }
