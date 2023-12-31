@@ -2,8 +2,172 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused_assignments)]
-// Uncomment this block to pass the first stage
-use std::{env::args, fs::File, io::Read, net::UdpSocket};
+
+use std::{collections::vec_deque, env::args, fs::File, io::Read, net::UdpSocket};
+
+#[derive(Debug)]
+struct BytePacketBufffer {
+    buf: [u8; 512],
+    pos: usize,
+}
+
+impl BytePacketBufffer {
+    /// Gives us a fresh buffer to hold the message, and a pointer into the buff
+    fn new() -> BytePacketBufffer {
+        BytePacketBufffer {
+            buf: [0; 512],
+            pos: 0,
+        }
+    }
+
+    /// Current position
+    fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Step pointer forward a specific number of bytes
+    fn step(&mut self, steps: usize) -> Result<(), ()> {
+        self.pos += steps;
+
+        Ok(())
+    }
+
+    /// Move pointer to specific position
+    fn seek(&mut self, pos: usize) -> Result<(), ()> {
+        self.pos = pos;
+
+        Ok(())
+    }
+
+    /// Read one u8 and advance pointer
+    fn read(&mut self) -> Result<u8, ()> {
+        if self.pos >= 512 {
+            return Err(());
+        }
+
+        let res = self.buf[self.pos];
+        self.pos += 1;
+
+        Ok(res)
+    }
+
+    /// Get a single u8 without moving pointer
+    fn get(&mut self, pos: usize) -> Result<u8, ()> {
+        if pos >= 512 {
+            return Err(());
+        }
+
+        let res = self.buf[self.pos];
+
+        Ok(res)
+    }
+
+    /// Get a single u8 without moving pointer
+    fn get_range(&mut self, start: usize, len: usize) -> Result<&[u8], ()> {
+        if start + len >= 512 {
+            return Err(());
+        }
+
+        Ok(&self.buf[start..start + len])
+    }
+
+    /// Read one u16 and advance pointer
+    fn read_u16(&mut self) -> Result<u16, ()> {
+        let res = ((self.read()? as u16) << 8) | (self.read()? as u16);
+
+        Ok(res)
+    }
+
+    /// Read one u32 and advance pointer
+    fn read_u32(&mut self) -> Result<u32, ()> {
+        let res = ((self.read_u16()? as u32) << 16) | (self.read_u16()? as u32);
+
+        Ok(res)
+    }
+
+    /// Read a qname
+    ///
+    /// The tricky part: Reading domain names, taking labels into consideration.
+    /// Will take something like [3]www[6]google[3]com[0] and append
+    /// www.google.com to outstr.
+    fn read_qname(&mut self, outstr: &mut String) -> Result<(), ()> {
+        let pointer_location = self.pos();
+
+        // Track the number of segments
+        let _limit: usize = 64;
+        let mut segments = 0;
+
+        // Track if we have jumped and how many times
+        let mut jumped: bool = false;
+        let _max_jumps = 10;
+        let mut jumps_done = 0;
+
+        let mut delimiter = "";
+
+        let mut lpos = self.pos();
+
+        // Loop until we reach a null byte or we hit a segment/jump limit
+        loop {
+            // We have to assume that the data is untrusted so we need to be
+            // paranoid. A message can be formed in which we keep jumping
+            // forever and consume CPU cycles
+            if jumps_done > _max_jumps {
+                return Err(());
+            }
+
+            // Now we are at the beginning of a segment
+            let segment_len = self.get(lpos)?;
+
+            // If the lenght has the most significant bits set then it must be
+            // a pointer
+            if (segment_len & 0xC0) == 0xC0 {
+                // Update the buffer position to a point past the jump. We don't
+                // need to touch it any further
+                if !jumped {
+                    self.seek(lpos + 2)?;
+                }
+
+                // Read another byte, calcualte the offset and perform the jump
+                // by updating out local position variable
+                let b2 = self.get(lpos + 1)? as u16;
+                let offset = ((segment_len as u16) ^ 0xC0) << 8 | b2;
+                lpos = offset as usize;
+
+                // indicate that a jumpt was performed
+                jumped = true;
+                jumps_done += 1;
+
+                continue;
+            }
+            // The best scenario, reading a single label and appending it to output
+            else {
+                lpos += 1;
+
+                // names are terminated by an empty label, so if the length is
+                // zero we're done
+                if segment_len == 0 {
+                    break;
+                }
+
+                // append the delimiter to our output buffe first
+                outstr.push_str(delimiter);
+
+                // Extract the actual ASCII bytes for this segment
+                let str_buffer = self.get_range(lpos, segment_len as usize);
+
+                delimiter = ".";
+
+                lpos += segment_len as usize;
+            }
+        }
+
+        if !jumped {
+            self.seek(lpos)?;
+        }
+
+        Ok(())
+    }
+}
 
 #[allow(dead_code, unused_variables, unused_assignments)]
 #[derive(Debug)]
@@ -28,6 +192,17 @@ struct DNSResource {
 }
 
 impl DNSResource {
+    fn shell() -> DNSResource {
+        DNSResource {
+            name: vec![],
+            rtype: 0,
+            class: 0,
+            ttl: 0,
+            rdlength: 0,
+            rdata: vec![],
+        }
+    }
+
     fn to_wire(&self) -> Vec<u8> {
         let mut buf = vec![];
 
@@ -56,6 +231,22 @@ impl DNSResource {
                     .to_vec()
             },
         })
+    }
+
+    fn from_buffer(&mut self, buf: &mut BytePacketBufffer) -> Result<(), ()> {
+        let mut s = String::new();
+
+        let res = buf.read_qname(&mut s)?;
+
+        self.name = s.as_bytes().to_vec();
+        self.rtype = buf.read_u16()?;
+        self.class = buf.read_u16()?;
+        self.ttl = buf.read_u32()?;
+        self.rdlength = buf.read_u16()?;
+        self.rdata = buf.get_range(buf.pos(), self.rdlength as usize)?.to_vec();
+        buf.step(self.rdlength as usize);
+
+        Ok(())
     }
 }
 
@@ -133,6 +324,27 @@ impl DNSQuery {
             qtype: buf.get_u16(),
             qclass: buf.get_u16(),
         })
+    }
+
+    fn shell() -> DNSQuery {
+        DNSQuery {
+            qname: vec![],
+            qtype: 0,
+            qclass: 0,
+        }
+    }
+
+    fn from_buffer(&mut self, buf: &mut BytePacketBufffer) -> Result<(), ()> {
+        let mut s = String::new();
+
+        let res = buf.read_qname(&mut s);
+
+        self.qname = s.as_bytes().to_vec();
+
+        self.qtype = buf.read_u16()?;
+        self.qclass = buf.read_u16()?;
+
+        Ok(())
     }
 
     fn to_wire(&self) -> Vec<u8> {
@@ -341,6 +553,43 @@ impl DNSMessage {
         self.ans = answers;
     }
 
+    /// Create an empty DNSMessage, used as a shell for initialization
+    fn shell() -> DNSMessage {
+        DNSMessage {
+            transport: Transport::UDP,
+            raw: RawWrapper::new(&vec![0]),
+            header: DNSHeader::shell(),
+            queries: vec![],
+            ans: vec![],
+            nsr: vec![],
+            arc: vec![],
+        }
+    }
+
+    /// Parse a DNS message from an underlying buffer
+    fn from_buffer(buffer: &mut BytePacketBufffer) -> Result<DNSMessage, ()> {
+        let mut result = DNSMessage::shell();
+
+        // extract header information
+        result.header.from_buffer(buffer)?;
+
+        // extract queries
+        for _ in 0..result.header.qdcount {
+            let mut queston = DNSQuery::shell();
+            queston.from_buffer(buffer)?;
+            result.queries.push(queston);
+        }
+
+        // extract answers
+        for _ in 0..result.header.ancount {
+            let mut res = DNSResource::shell();
+            res.from_buffer(buffer)?;
+            result.ans.push(res);
+        }
+
+        Ok(result)
+    }
+
     fn process_queries(&mut self, socket: &mut UdpSocket, resolver: Option<&String>) {
         let _queries = &self.queries;
 
@@ -499,6 +748,30 @@ impl DNSHeader {
         self.arcount = wrapper.get_u16();
     }
 
+    fn from_buffer(&mut self, buffer: &mut BytePacketBufffer) -> Result<(), ()> {
+        let id = buffer.read_u16()?;
+
+        let flags = buffer.read_u16()?;
+
+        self.id = id;
+        self.qr = flags >> 15 == 1;
+        self.opcode = OPCODE::from_wire(&flags);
+        self.aa = (flags & 0x400) >> 10 == 1;
+        self.tc = (flags & 0x200) >> 9 == 1;
+        self.rd = (flags & 0x100) >> 8 == 1;
+        self.ra = (flags & 0x80) >> 7 == 1;
+        self.z = (flags & 0x40) >> 6 == 1;
+        self.ad = (flags & 0x20) >> 5 == 1;
+        self.cd = (flags & 0x10) >> 4 == 1;
+        self.rcode = RCODE::from_wire(&flags);
+        self.qdcount = buffer.read_u16()?;
+        self.ancount = buffer.read_u16()?;
+        self.nscount = buffer.read_u16()?;
+        self.arcount = buffer.read_u16()?;
+
+        Ok(())
+    }
+
     fn to_wire(&self) -> Vec<u8> {
         let mut buf = vec![];
 
@@ -533,26 +806,16 @@ fn main() {
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
 
-    // let args = args().collect::<Vec<String>>();
-    // // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
-    // let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
+    let args = args().collect::<Vec<String>>();
+    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
-    // let mut res_addr = None;
+    let mut res_addr = "8.8.8.8:53".to_string();
 
-    // for arg in std::env::args() {
-    //     if arg == "--resolver" {
-    //         res_addr = Some(std::env::args().nth(2).unwrap());
-    //     }
-    // }
-
-    // let mut f = File::open("query_raw.txt").unwrap();
-    // let mut buffer = [0; 512];
-    // let a = f.read(&mut buffer).unwrap();
-    // dbg!(buffer);
-    //
-    // let mut ndns = DNSMessage::new(&buffer);
-    // ndns.from_wire();
-    // dbg!(ndns);
+    for arg in std::env::args() {
+        if arg == "--resolver" {
+            res_addr = std::env::args().nth(2).clone().unwrap();
+        }
+    }
 
     loop {
         match udp_socket.recv_from(&mut buf) {
@@ -565,16 +828,59 @@ fn main() {
                 // dbg!(buf.hex_dump());
                 let mut ndns = DNSMessage::new(&buf);
 
+                let mut dns_buf = BytePacketBufffer::new();
+                dns_buf.buf = buf;
+
+                // let mut ndns = DNSMessage::from_buffer(&mut dns_buf).unwrap();
+
+                println!("Parse message");
                 ndns.from_wire();
                 // ndns.process_queries(&mut res_socket, res_addr.as_ref());
 
-                // dbg!(&ndns);
+                println!("Start forward");
+                println!("Recursive Server is {:#?}", &res_addr);
+                // HERE IS WHERE WE NEED TO QUERY THE RECURSIVE RESOLVER
+
+                println!("Creating forward packet");
+                let mut forward_buf = [0; 512];
+                let mut forward_dns = DNSMessage::new(&mut forward_buf);
+
+                forward_dns.header.id = ndns.header.id;
+                forward_dns.header.qr = false;
+                forward_dns.header.opcode = OPCODE::QUERY;
+                forward_dns.queries = ndns.queries.clone();
+                forward_dns.header.qdcount = ndns.queries.len() as u16;
+
+                let raw_message = forward_dns.to_wire();
+                println!("Forward Message: {:#?}", &forward_dns);
+                println!("Raw Message: {:#?}", &raw_message);
+
+                //// write to socket
+                println!("Sending message...");
+                res_socket
+                    .send_to(&raw_message, &res_addr)
+                    .expect("Failed to send data");
+
+                let mut res_buffer = [0; 512];
+                println!("Waiting for message...");
+                res_socket
+                    .recv_from(&mut res_buffer)
+                    .expect("Failed to read data");
+
+                let mut res_dns = DNSMessage::new(&res_buffer);
+                res_dns.from_wire();
+                println!("Ans Message: {:#?}", &res_dns);
+
+                ndns.ans = res_dns.ans;
+                // THE REST IS AS NORMAL
+                println!("Finished forward");
 
                 ndns.prepare_answer();
                 // ndns.add_fake_answer();
                 ndns.process_que();
 
                 // dbg!(&ndns);
+                println!("{:#?}", ndns);
 
                 let response = ndns.to_wire();
 
