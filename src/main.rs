@@ -1,5 +1,9 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_assignments)]
 // Uncomment this block to pass the first stage
-use std::{env::args, net::UdpSocket};
+use std::{env::args, fs::File, io::Read, net::UdpSocket};
 
 #[allow(dead_code, unused_variables, unused_assignments)]
 #[derive(Debug)]
@@ -317,14 +321,13 @@ impl DNSMessage {
     fn from_wire(&mut self) {
         // parse header information
         self.header.from_wire(&mut self.raw);
-        dbg!(&self.header);
 
         // parse queries
-        let header = self.header.qdcount;
         let mut queries = vec![];
         let mut answers = vec![];
 
-        for _ in 0..header {
+        for _ in 0..self.header.qdcount {
+            dbg!("Processing query...");
             let a = DNSQuery::from_wire(&mut self.raw).unwrap();
             queries.push(a);
         }
@@ -398,6 +401,38 @@ impl DNSMessage {
 
     fn prepare_answer(&mut self) {
         self.header.qr = true;
+        self.header.rcode = match self.header.opcode {
+            OPCODE::QUERY => RCODE::NoErr,
+            _ => RCODE::NotImplemented,
+        }
+    }
+
+    fn process_que(&mut self) {
+        for q in self.queries.iter() {
+            let answer = DNSResource {
+                name: q.qname.clone(),
+                rtype: 1,
+                class: 1,
+                ttl: 50,
+                rdlength: 4,
+                rdata: b"\x08\x08\x08\x08".to_vec(),
+            };
+            self.header.ancount += 1;
+        }
+    }
+
+    fn add_fake_answer(&mut self) {
+        let answer = DNSResource {
+            name: b"\x0ccodecrafters\x02io\x00".to_vec(),
+            rtype: 1,
+            class: 1,
+            ttl: 50,
+            rdlength: 4,
+            rdata: b"\x08\x08\x08\x08".to_vec(),
+        };
+
+        self.ans.push(answer);
+        self.header.ancount += 1;
     }
 
     fn to_wire(&mut self) -> Vec<u8> {
@@ -497,17 +532,26 @@ fn main() {
     let udp_socket = UdpSocket::bind("127.0.0.1:2053").expect("Failed to bind to address");
     let mut buf = [0; 512];
 
-    let args = args().collect::<Vec<String>>();
-    // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
-    let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
+    // let args = args().collect::<Vec<String>>();
+    // // let res_addr = if args.len() == 3 { Some(&args[2]) } else { None };
+    // let mut res_socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind to local");
 
-    let mut res_addr = None;
+    // let mut res_addr = None;
 
-    for arg in std::env::args() {
-        if arg == "--resolver" {
-            res_addr = Some(std::env::args().nth(2).unwrap());
-        }
-    }
+    // for arg in std::env::args() {
+    //     if arg == "--resolver" {
+    //         res_addr = Some(std::env::args().nth(2).unwrap());
+    //     }
+    // }
+
+    // let mut f = File::open("query_raw.txt").unwrap();
+    // let mut buffer = [0; 512];
+    // let a = f.read(&mut buffer).unwrap();
+    // dbg!(buffer);
+    //
+    // let mut ndns = DNSMessage::new(&buffer);
+    // ndns.from_wire();
+    // dbg!(ndns);
 
     loop {
         match udp_socket.recv_from(&mut buf) {
@@ -521,7 +565,13 @@ fn main() {
                 let mut ndns = DNSMessage::new(&buf);
 
                 ndns.from_wire();
-                ndns.process_queries(&mut res_socket, res_addr.as_ref());
+                // ndns.process_queries(&mut res_socket, res_addr.as_ref());
+
+                // dbg!(&ndns);
+
+                ndns.prepare_answer();
+                // ndns.add_fake_answer();
+                ndns.process_que()
 
                 // dbg!(&ndns);
 
